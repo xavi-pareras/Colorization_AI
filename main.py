@@ -7,7 +7,7 @@ import torchvision.transforms as transforms
 
 from dataset import MyDataset
 from model import MyModel
-from utils import accuracy, save_model
+from utils import  save_model
 
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -75,7 +75,7 @@ def train_model(config):
     optimizer = optim.Adam(my_model.parameters(), config["lr"])
     
     #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer)
-
+    min_loss = 1
     for epoch in range(config["epochs"]):
         train_loss = train_single_epoch(
             train_loader, my_model, optimizer)
@@ -83,6 +83,10 @@ def train_model(config):
         eval_loss = eval_single_epoch(
             test_loader, my_model)
         print(f"Test Epoch {epoch} loss={eval_loss:.5f}")
+
+        if(eval_loss<min_loss):
+            min_loss = eval_loss
+            save_model(my_model, 'model_weights')
 
     return my_model
 
@@ -95,3 +99,4 @@ if __name__ == "__main__":
     }
 
     train_model(config)
+    
