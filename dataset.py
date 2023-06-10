@@ -3,6 +3,9 @@ import os
 import pandas as pd
 from torch.utils.data import Dataset
 from PIL import Image
+import numpy as np
+from skimage.color import rgb2lab, lab2rgb
+import torchvision.transforms as transforms
 
 class MyDataset(Dataset):
 
@@ -14,6 +17,9 @@ class MyDataset(Dataset):
         self.color_image_paths = []
         self.addDataFromPath(gray_directory)
         self.transform = transform
+        self.image_channel_axis = self.getImage(self.color_image_paths[0]).shape.index(3)
+        self.channel_axis = 2
+        
         
     
 
@@ -24,7 +30,15 @@ class MyDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        return self.getImage(self.image_paths[idx]) , self.getImage(self.color_image_paths[idx])
+        img = Image.open(self.color_image_paths[idx]).convert("RGB")
+        img = self.transform(img)
+        img = np.array(img)
+        img = np.moveaxis(img, self.image_channel_axis, self.channel_axis)
+        img_lab = rgb2lab(img, channel_axis = self.channel_axis).astype("float32") # Converting RGB to L*a*b
+        img_lab = transforms.ToTensor()(img_lab)
+        L = img_lab[[0], ...] / 50. - 1. # Between -1 and 1
+        ab = img_lab[[1, 2], ...] / 110. # Between -1 and 1
+        return {'L': L, 'ab': ab}
         
         
         
