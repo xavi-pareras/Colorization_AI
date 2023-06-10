@@ -6,60 +6,70 @@ import numpy as np
 import torchvision.transforms as transforms
 
 from dataset import MyDataset
-from model import MyModel
-from utils import  save_model
+from model import Unet
+from utils import  save_model, init_model
+from PIL import Image
+from ray import tune
+
 
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 criterion = torch.nn.MSELoss()
+SIZE = 256
+optmizeHyperParameters = False
+cpuThreads = 24
 
 
-
-def train_single_epoch(loader, model, optimizer, scheduler = None):
-
-    model.train()
+def run_single_epoch(loader, model, optimizer=None, scheduler=None):
     losses = []
+  
+    for data in loader:
+        l_images = data["L"]
+        ab_images = data["ab"]
+        
+        l_images, ab_images = l_images.to(device), ab_images.to(device)
+        
+        if model.training: 
+            optimizer.zero_grad()
 
-    for gray_images, color_images in loader:
-
-        gray_images, color_images = gray_images.to(device), color_images.to(device)
+        output_images = model(l_images)
         
+        loss = criterion(output_images, ab_images)
+        if model.training:
+            loss.backward()
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step(loss)
         
-        optimizer.zero_grad()
-        output_images = model(gray_images)
-        
-        loss = criterion(output_images, color_images)
-        loss.backward()
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step(loss)
         losses.append(loss.item())
         
 
     return np.mean(losses)
 
 
+def train_single_epoch(loader, model, optimizer, scheduler = None):
+
+    model.train()
+    return run_single_epoch(loader, model, optimizer, scheduler)
+
+
+
 def eval_single_epoch( loader, model):
-    losses = []
+    
     with torch.no_grad():
         model.eval()
-        for gray_images, color_images in loader:
-            gray_images, color_images = gray_images.to(device), color_images.to(device)
-            
-            output_images = model(gray_images)
-            loss = criterion(output_images, color_images)
-            
-            
-           
-            losses.append(loss.item())
+        return run_single_epoch(loader, model)
 
-    return np.mean(losses)
+   
 
 
 def train_model(config):
 
-    transformToTensor = transforms.Compose([transforms.Resize(size=(250, 250)) ,transforms.ToTensor(), transforms.Normalize(0.5, 0.5)])
-    my_dataset = MyDataset('data\Grey','data\Color',
+    transformToTensor = transforms.Compose([
+        transforms.Resize((SIZE, SIZE),  Image.BICUBIC) ,
+        transforms.ToTensor(), 
+        transforms.RandomHorizontalFlip()])
+    my_dataset = MyDataset('/Users/orijf/OneDrive/Documentos/VisualStudioMainFolder/Colorization/data/Grey','/Users/orijf/OneDrive/Documentos/VisualStudioMainFolder/Colorization/data/Color',
                          transform=transformToTensor)
     
   
@@ -71,32 +81,76 @@ def train_model(config):
     train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config["batch_size"])
     test_loader = DataLoader(test_dataset, batch_size=config["batch_size"])
-    my_model = MyModel(config).to(device)
-    optimizer = optim.Adam(my_model.parameters(), config["lr"])
+    model = init_model(Unet(config), device)
+    optimizer = optim.Adam(model.parameters(), config["lr"])
     
     #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer)
     min_loss = 1
     for epoch in range(config["epochs"]):
         train_loss = train_single_epoch(
-            train_loader, my_model, optimizer)
+            train_loader, model, optimizer)
         print(f"Train Epoch {epoch} loss={train_loss:.5f} ")
         eval_loss = eval_single_epoch(
-            test_loader, my_model)
+            test_loader, model)
         print(f"Test Epoch {epoch} loss={eval_loss:.5f}")
+       
 
-        if(eval_loss<min_loss):
-            min_loss = eval_loss
-            save_model(my_model, 'model_weights')
+        if  optmizeHyperParameters:
+            tune.report(val_loss=eval_loss)
+        else:
+            if(eval_loss<min_loss):
+                min_loss = eval_loss
+                save_model(model, 'model_weights')
+        
 
-    return my_model
+    
 
 
 if __name__ == "__main__":
-    config = {
-        "lr": 0.001,
-        "batch_size": 32,
-        "epochs": 30,
-    }
+        if optmizeHyperParameters:
+            analysis = tune.run(
+                train_model,
+                metric="val_loss",
+                mode="min",
+                num_samples=12,
+                resources_per_trial={
+                    "cpu": 2},
+                stop={
+                 "training_iteration": 10000000,
+                },
+                config = {
+                    "lr": tune.loguniform(1e-4, 1e-2),
+                    "batch_size": tune.choice([32, 64, 128]),
+                    "epochs": 10,              
+                    "input_c": 1,
+                    "output_c": 2, 
+                    "n_down": tune.choice([2, 4, 8]),
+                    "num_filters": tune.choice([32, 64]),
+                })
+            print("Best hyperparameters found were: ", analysis.best_config)
+        else:
+  
+            config = {
+                "lr": 0.00044749588937525244,
+                "batch_size": 64,
+                "epochs": 30, 
+                "input_c": 1,
+                "output_c": 2, 
+                "n_down": 2,
+                "num_filters": 64            
+            }
 
-    train_model(config)
+
+            if cpuThreads > 1:
+                 analysis = tune.run(
+                train_model,
+                metric="val_loss",
+                mode="min",
+                num_samples=12,
+                resources_per_trial={
+                    "cpu": cpuThreads},
+                config = config)
+            else:
+                train_model(config)
+  
     
